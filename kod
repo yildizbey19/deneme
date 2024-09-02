@@ -1,0 +1,225 @@
+import sys
+import pandas as pd
+import numpy as np
+import itertools
+from PyQt5 import QtWidgets, QtCore
+from PyQt5.QtWidgets import QFileDialog, QTableWidgetItem, QMessageBox, QVBoxLayout, QLabel, QPushButton, QTableWidget, QComboBox
+
+class CostCalculatorApp(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Taşıma Maliyeti Hesabı")
+        self.setGeometry(100, 100, 800, 600)
+
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.upload_button = QPushButton("Excel dosyanızı yükleyin", self)
+        self.upload_button.clicked.connect(self.upload_file)
+        self.layout.addWidget(self.upload_button)
+
+        self.template_button = QPushButton("Şablon Excel dosyasını indirmek için tıklayın", self)
+        self.template_button.clicked.connect(self.download_template)
+        self.layout.addWidget(self.template_button)
+
+        self.table_widget = QTableWidget(self)
+        self.layout.addWidget(self.table_widget)
+
+        self.combo_material = QComboBox(self)
+        self.combo_material.currentIndexChanged.connect(self.show_material_cost)
+        self.layout.addWidget(self.combo_material)
+
+        self.combo_start = QComboBox(self)
+        self.layout.addWidget(self.combo_start)
+
+        self.combo_end = QComboBox(self)
+        self.layout.addWidget(self.combo_end)
+
+        self.show_combination_cost_button = QPushButton("Toplam Taşıma Maliyetini Göster", self)
+        self.show_combination_cost_button.clicked.connect(self.show_combination_cost)
+        self.layout.addWidget(self.show_combination_cost_button)
+
+        self.variables = []
+        self.types = []
+        self.components = []
+        self.df = None
+        self.distance_df = None
+        self.best_combination = None
+
+    def upload_file(self):
+        try:
+            options = QFileDialog.Options()
+            file_name, _ = QFileDialog.getOpenFileName(self, "Excel Dosyasını Yükle", "", "Excel Files (*.xlsx)", options=options)
+            if file_name:
+                self.df = pd.read_excel(file_name, sheet_name='Sayfa1')
+                self.variables, self.types, self.components = self.input_data(file_name)
+                col_range = f'N:{chr(78 + len(self.types+self.components))}'
+                self.distance_df = pd.read_excel(file_name, sheet_name='Sayfa1', usecols=col_range, nrows=len(self.types+self.components), index_col=0)
+
+                all_combinations = list(itertools.permutations(self.types, len(self.variables)))
+                min_cost = float('inf')
+                all_results = []
+
+                for combination in all_combinations:
+                    mapping = dict(zip(self.variables, combination))
+                    mapping.update({component: component for component in self.components})
+                    total_cost = self.calculate_total_cost(mapping)
+                    all_results.append((combination, total_cost))
+                    if total_cost < min_cost:
+                        min_cost = total_cost
+                        self.best_combination = mapping
+
+                if self.best_combination:
+                    self.show_optimal_layout(min_cost)
+        except FileNotFoundError:
+            QMessageBox.critical(self, "Hata", "Dosya bulunamadı. Lütfen geçerli bir Excel dosyası seçin.")
+        except pd.errors.EmptyDataError:
+            QMessageBox.critical(self, "Hata", "Excel dosyası boş. Lütfen geçerli bir dosya yükleyin.")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Beklenmeyen bir hata oluştu: {str(e)}")
+
+    def download_template(self):
+        try:
+            template_path = "YerleşimŞablon.xlsx"
+            options = QFileDialog.Options()
+            save_file_name, _ = QFileDialog.getSaveFileName(self, "Şablon Excel Dosyasını Kaydet", template_path, "Excel Files (*.xlsx)", options=options)
+            if save_file_name:
+                with open(template_path, "rb") as file:
+                    with open(save_file_name, "wb") as save_file:
+                        save_file.write(file.read())
+                QMessageBox.information(self, "Başarılı", "Şablon dosyası başarıyla kaydedildi.")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Şablon dosyasını kaydetmede hata oluştu: {str(e)}")
+
+    def input_data(self, excel_file):
+        try:
+            variables = []
+            types = []
+            components = []
+            df = pd.read_excel(excel_file, sheet_name='Sayfa1')
+
+            variable_column = 'Değişkenler'
+            type_column = 'Konum tipleri'
+            component_column = 'İlişkili konumlar'
+
+            if variable_column in df.columns:
+                variables = df[variable_column].dropna().tolist()
+            else:
+                raise ValueError(f"{variable_column} sütunu bulunamadı.")
+
+            if type_column in df.columns:
+                types = df[type_column].dropna().tolist()
+            else:
+                raise ValueError(f"{type_column} sütunu bulunamadı.")
+
+            if component_column in df.columns:
+                components = df[component_column].dropna().tolist()
+            else:
+                raise ValueError(f"{component_column} sütunu bulunamadı.")
+
+            return variables, types, components
+        except ValueError as e:
+            QMessageBox.critical(self, "Hata", str(e))
+            return [], [], []
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Veri girişinde bir hata oluştu: {str(e)}")
+            return [], [], []
+
+    def calculate_total_cost(self, mapping):
+        try:
+            total_cost = 0
+            varcomp = list(mapping.keys())
+            for var1 in varcomp:
+                for var2 in varcomp:
+                    if var1 != var2:
+                        cost, _ = self.get_user_input(var1, var2)
+                        distance = self.get_distance(mapping[var1], mapping[var2])
+                        total_cost += cost * distance
+            return total_cost
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Toplam maliyet hesaplamasında hata oluştu: {str(e)}")
+            return float('inf')
+
+    def get_user_input(self, cıkıs, varıs):
+        try:
+            filtered_df = self.df[(self.df['Nereden'] == cıkıs) & (self.df['Nereye'] == varıs)]
+            total_cost = 0
+            malzeme_kodları = []
+            for _, row in filtered_df.iterrows():
+                F = float(str(row['Sıklık']).replace(',', '.'))
+                OHM = float(str(row['Birim Maliyet']).replace(',', '.'))
+                distance = self.get_distance(cıkıs, varıs)
+                cost = F * OHM * distance
+                total_cost += cost
+                malzeme_kodları.append(row['Malzeme Kodu'])
+            return total_cost, malzeme_kodları
+        except KeyError as e:
+            QMessageBox.critical(self, "Hata", f"Gerekli sütun bulunamadı: {str(e)}")
+            return 0, []
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Kullanıcı girdisini alırken hata oluştu: {str(e)}")
+            return 0, []
+
+    def get_distance(self, cıkıs, varıs):
+        try:
+            if cıkıs in self.distance_df.index and varıs in self.distance_df.columns:
+                distance = self.distance_df.loc[cıkıs, varıs]
+                return 1 if pd.isna(distance) else distance
+            else:
+                return 1
+        except KeyError:
+            return 1
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Mesafe hesaplamasında hata oluştu: {str(e)}")
+            return 1
+
+    def show_optimal_layout(self, min_cost):
+        try:
+            result_df = pd.DataFrame(list(self.best_combination.items()), columns=["Değişkenler", "Yerleşeceği Yerler"])
+            result_df = result_df[result_df["Değişkenler"].isin(self.variables)]
+
+            self.table_widget.setRowCount(len(result_df))
+            self.table_widget.setColumnCount(2)
+            self.table_widget.setHorizontalHeaderLabels(["Değişkenler", "Yerleşeceği Yerler"])
+
+            for i, (variable, location) in enumerate(result_df.values):
+                self.table_widget.setItem(i, 0, QTableWidgetItem(variable))
+                self.table_widget.setItem(i, 1, QTableWidgetItem(location))
+
+            self.combo_material.addItems(self.df['Malzeme Kodu'].unique())
+            self.combo_start.addItems(self.df['Nereden'].unique())
+            self.combo_end.addItems(self.df['Nereye'].unique())
+
+            QMessageBox.information(self, "Optimum Yerleşim", f"Optimum yerleşim düzeni için toplam maliyet: {min_cost}")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Optimum yerleşimi gösterirken hata oluştu: {str(e)}")
+
+    def show_material_cost(self):
+        try:
+            selected_material = self.combo_material.currentText()
+            if selected_material:
+                selected_material_df = self.df[self.df['Malzeme Kodu'] == selected_material]
+                cıkıs = selected_material_df['Nereden'].values[0]
+                varıs = selected_material_df['Nereye'].values[0]
+                total_cost, malzeme_kodları = self.get_user_input(cıkıs, varıs)
+                QMessageBox.information(self, "Malzeme Maliyeti", f"Seçilen malzeme için toplam taşıma maliyeti: {total_cost}")
+        except IndexError:
+            QMessageBox.critical(self, "Hata", "Seçilen malzeme için veri bulunamadı.")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Malzeme maliyetini gösterirken hata oluştu: {str(e)}")
+
+    def show_combination_cost(self):
+        try:
+            cıkıs = self.combo_start.currentText()
+            varıs = self.combo_end.currentText()
+            total_cost, malzeme_kodları = self.get_user_input(cıkıs, varıs)
+            QMessageBox.information(self, "Toplam Maliyet", f"Seçilen kombinasyon için toplam maliyet: {total_cost}")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Kombinasyon maliyetini gösterirken hata oluştu: {str(e)}")
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    main_window = CostCalculatorApp()
+    main_window.show()
+    sys.exit(app.exec_())
